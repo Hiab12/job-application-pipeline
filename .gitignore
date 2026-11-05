@@ -1,0 +1,18 @@
+# Secrets and personal data: never commit these
+.env
+data/master_cv.yaml
+
+# Generated files
+output/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Editor settings 
+.vscode/

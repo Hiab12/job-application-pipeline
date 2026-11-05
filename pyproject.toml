@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-application-pipeline"
+version = "0.1.0"
+description = "Fetches job offers, scores fit with Claude, generates tailored CVs and cover letters, and tracks them in Notion."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Hiba El Harrab" }]
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+jobpipeline = "jobpipeline.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
