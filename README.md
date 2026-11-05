@@ -13,13 +13,20 @@ Adzuna ─────────┘                              │ < min sco
                                                └─► logged as "Skipped"
 ```
 
+## Data sources
+
+| Source | Access | Notes |
+|---|---|---|
+| Adzuna | Free keys, instant | Aggregates many French job boards. Returns a description snippet; the full offer is behind the link. |
+| France Travail | Granted on request | The Offres d'emploi API is now access-on-request. The source is implemented and switches on once access is granted. |
+
 ## Status
 
 | Step | Feature | Status |
 |---|---|---|
 | 1 | Project skeleton: config, logging, models, CLI | ✅ |
-| 2 | France Travail source | ⏳ |
-| 3 | Adzuna source | ⏳ |
+| 2 | France Travail source | ✅ |
+| 3 | Adzuna source | ✅ |
 | 4 | Structured master CV | ⏳ |
 | 5 | Offer analysis and scoring | ⏳ |
 | 6 | CV and cover letter generation | ⏳ |
@@ -77,10 +84,15 @@ src/jobpipeline/
 ├── __main__.py       # CLI entry point
 ├── config.py         # config.yaml + .env loading and validation
 ├── errors.py         # exception hierarchy
+├── http.py           # shared HTTP client + retry policy (429, 5xx, network errors)
 ├── logging_setup.py  # console + rotating file logs
 ├── models.py         # JobOffer, OfferAnalysis, normalization helpers
-└── pipeline.py       # orchestration and run summary
-tests/                # pytest suite
+├── pipeline.py       # orchestration and run summary
+└── sources/
+    ├── base.py            # JobSource interface + shared per-keyword loop
+    ├── adzuna.py          # Adzuna API (pagination, HTML cleanup)
+    └── france_travail.py  # France Travail API (OAuth2, search, parsing)
+tests/                # pytest suite, external APIs simulated with httpx.MockTransport
 ```
 
 ## Development
@@ -96,4 +108,7 @@ ruff format .    # format
 - **Config is validated, not just read.** Pydantic models reject unknown keys and out-of-range values at startup.
 - **Secrets never touch the code or the logs.** Keys are `SecretStr`, which prints as `**********`.
 - **Sources share one model.** Each API is converted into `JobOffer`, so later stages don't depend on any provider's format.
+- **Failures stay local.** A failing keyword doesn't stop the other keywords, and a failing source doesn't stop the other sources. Every error is counted in the run summary.
+- **Network calls are resilient.** Rate limits and temporary server errors are retried with exponential backoff, honouring the server's `Retry-After` header.
+- **No network in tests.** API responses are simulated, so the suite runs in under a second and never needs real keys.
 - **Expected errors are typed.** Everything raised on purpose inherits from `PipelineError`, which separates operational failures from bugs.

@@ -42,7 +42,8 @@ class SearchConfig(_StrictModel):
     departement: str | None = None
     distance_km: int = Field(default=30, ge=0, le=200)
     max_age_days: int = 3
-    max_results_per_source: int = Field(default=50, ge=1, le=150)
+    # Per keyword and per source. France Travail returns at most 150 per request.
+    max_results_per_query: int = Field(default=50, ge=1, le=150)
 
     @field_validator("keywords")
     @classmethod

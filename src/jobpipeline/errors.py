@@ -17,6 +17,10 @@ class SourceError(PipelineError):
     """A job source (France Travail, Adzuna) failed to return offers."""
 
 
+class AuthenticationError(SourceError):
+    """A source rejected the API keys. Retrying other searches is pointless."""
+
+
 class LLMError(PipelineError):
     """The Claude API call failed or returned an unusable response."""
 

@@ -1,18 +1,22 @@
 """Pipeline orchestration.
 
 ``Pipeline.run`` chains the stages: fetch -> dedup -> analyze -> generate -> Notion.
-Stages are plugged in step by step; this skeleton already provides the run summary
-and the dry-run / limit options that every later step relies on.
+Stages are plugged in step by step. Each stage is isolated: one failing source or
+offer is logged and counted, and the run continues with the rest.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 
 from jobpipeline.config import Settings
+from jobpipeline.errors import SourceError
+from jobpipeline.http import build_http_client
 from jobpipeline.models import JobOffer
+from jobpipeline.sources import JobSource, build_sources
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +57,15 @@ class RunSummary:
 class Pipeline:
     """Runs one full pass of the job application pipeline."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, sources: list[JobSource] | None = None) -> None:
+        """
+        Args:
+            settings: Validated configuration.
+            sources: Override the sources (used by tests). By default, every source
+                whose keys are configured is enabled.
+        """
         self.settings = settings
+        self._sources = sources
 
     def run(self, *, dry_run: bool = False, limit: int | None = None) -> RunSummary:
         """Execute one pass.
@@ -74,16 +85,57 @@ class Pipeline:
             search.location,
         )
 
-        offers = self._fetch_offers(summary)
-        summary.fetched = len(offers)
+        with ExitStack() as stack:
+            sources = self._sources
+            if sources is None:
+                http = stack.enter_context(build_http_client())
+                sources = build_sources(self.settings, http)
+            offers = self._fetch_offers(sources, summary)
 
-        # Steps 5 to 9 (dedup, analysis, documents, Notion) plug in here.
+        summary.fetched = len(offers)
+        selected = offers[:limit] if limit else offers
+
+        if dry_run:
+            self._log_offers(selected)
+        else:
+            # Steps 5 to 9 (dedup, analysis, documents, Notion) plug in here.
+            logger.warning("Analysis not implemented yet (coming in step 5)")
 
         summary.duration_s = time.perf_counter() - start
         summary.log()
         return summary
 
-    def _fetch_offers(self, summary: RunSummary) -> list[JobOffer]:
-        """Collect offers from every source. Implemented in steps 2 and 3."""
-        logger.warning("No job sources implemented yet (coming in step 2)")
-        return []
+    def _fetch_offers(self, sources: list[JobSource], summary: RunSummary) -> list[JobOffer]:
+        """Collect offers from every source, merged by uid. A failing source is skipped."""
+        if not sources:
+            logger.warning("No job source enabled: add API keys to .env")
+            return []
+
+        offers: dict[str, JobOffer] = {}
+        for source in sources:
+            try:
+                for offer in source.fetch(self.settings.config.search):
+                    offers.setdefault(offer.uid, offer)
+            except SourceError as exc:
+                logger.error("Source %s failed: %s", source.name, exc)
+                summary.record_error(str(exc))
+        return sorted(
+            offers.values(),
+            key=lambda o: o.published_at.timestamp() if o.published_at else 0.0,
+            reverse=True,
+        )
+
+    @staticmethod
+    def _log_offers(offers: list[JobOffer]) -> None:
+        for i, offer in enumerate(offers, 1):
+            published = offer.published_at.date().isoformat() if offer.published_at else "?"
+            logger.info(
+                "%3d. [%s] %s | %s | %s | %s\n     %s",
+                i,
+                offer.source,
+                offer.title,
+                offer.company or "(company not disclosed)",
+                offer.location or "?",
+                published,
+                offer.url,
+            )
