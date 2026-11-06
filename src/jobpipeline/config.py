@@ -153,7 +153,7 @@ class Settings:
     config_path: Path
 
 
-def _format_validation_error(source: str, exc: ValidationError) -> str:
+def format_validation_error(source: str, exc: ValidationError) -> str:
     lines = [f"Invalid configuration in {source}:"]
     for err in exc.errors():
         location = ".".join(str(part) for part in err["loc"]) or "(root)"
@@ -189,7 +189,7 @@ def load_settings(
     try:
         app_config = AppConfig.model_validate(raw)
     except ValidationError as exc:
-        raise ConfigError(_format_validation_error(str(path), exc)) from exc
+        raise ConfigError(format_validation_error(str(path), exc)) from exc
 
     app_config = app_config.model_copy(
         update={"paths": app_config.paths.resolved_against(path.resolve().parent)}
@@ -199,6 +199,6 @@ def load_settings(
     try:
         secrets = Secrets(_env_file=env_path if env_path and env_path.is_file() else None)
     except ValidationError as exc:
-        raise ConfigError(_format_validation_error("environment variables", exc)) from exc
+        raise ConfigError(format_validation_error("environment variables", exc)) from exc
 
     return Settings(config=app_config, secrets=secrets, config_path=path.resolve())

@@ -27,7 +27,7 @@ Adzuna ─────────┘                              │ < min sco
 | 1 | Project skeleton: config, logging, models, CLI | ✅ |
 | 2 | France Travail source | ✅ |
 | 3 | Adzuna source | ✅ |
-| 4 | Structured master CV | ⏳ |
+| 4 | Structured master CV | ✅ |
 | 5 | Offer analysis and scoring | ⏳ |
 | 6 | CV and cover letter generation | ⏳ |
 | 7 | Notion integration | ⏳ |
@@ -47,6 +47,8 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
 cp .env.example .env               # then fill in your API keys
+cp data/master_cv.example.yaml data/master_cv.yaml   # then fill in your CV
+python -m jobpipeline --check-cv   # validate the CV
 python -m jobpipeline --dry-run    # check the setup without any paid call
 ```
 
@@ -72,7 +74,15 @@ python -m jobpipeline              # full run
 python -m jobpipeline --dry-run    # fetch and log only: no Claude calls, no files, no Notion
 python -m jobpipeline --limit 3    # process at most 3 new offers (caps API costs)
 python -m jobpipeline --log-level DEBUG
+python -m jobpipeline --check-cv   # validate data/master_cv.yaml and print a summary
 ```
+
+## Master CV
+
+`data/master_cv.yaml` is the single source of truth for every generated document. It lists
+everything worth saying, in French and English, including more than fits on one page. For each
+offer, Claude selects and rephrases the most relevant parts, and is never allowed to add
+anything that isn't in this file. See `data/master_cv.example.yaml` for the format.
 
 Exit codes: `0` run completed, `1` fatal error, `2` invalid configuration.
 Logs go to the console and to `logs/pipeline.log` (rotating, 5 x 1 MB).
@@ -83,6 +93,7 @@ Logs go to the console and to `logs/pipeline.log` (rotating, 5 x 1 MB).
 src/jobpipeline/
 ├── __main__.py       # CLI entry point
 ├── config.py         # config.yaml + .env loading and validation
+├── cv.py             # master CV schema, validation and text rendering
 ├── errors.py         # exception hierarchy
 ├── http.py           # shared HTTP client + retry policy (429, 5xx, network errors)
 ├── logging_setup.py  # console + rotating file logs

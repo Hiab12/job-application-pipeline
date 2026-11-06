@@ -1,0 +1,77 @@
+# Example master CV (fictional person). Copy to data/master_cv.yaml and replace with your data.
+# data/master_cv.yaml is gitignored: your personal data never reaches GitHub.
+#
+# Rules:
+# - Every text has a French (fr) and an English (en) version.
+# - Put MORE than fits on one page: the tailored CV picks the most relevant parts.
+# - Never anything untrue: Claude may rephrase and select, never invent.
+# - Dates: YYYY-MM, or "present" for an ongoing position.
+
+personal:
+  name: Alex Martin
+  title:
+    fr: Ingénieur Data Science
+    en: Data Science Engineer
+  email: alex.martin@example.com
+  phone: "+33 6 00 00 00 00"
+  location: Lyon, France
+  linkedin: linkedin.com/in/alex-martin-example
+  availability:
+    fr: Disponible immédiatement
+    en: Available immediately
+  mobility:
+    fr: Mobile dans toute la France
+    en: Open to relocation anywhere in France
+
+summary:
+  fr: Ingénieur spécialisé en data science, avec une expérience de modèles prédictifs en production.
+  en: Engineer specialised in data science, with experience of predictive models in production.
+
+skills:
+  - category: {fr: Machine Learning, en: Machine Learning}
+    items: [Scikit-learn, XGBoost, Feature engineering]
+  - category: {fr: Programmation, en: Programming}
+    items: [Python, SQL, Git]
+
+experience:
+  - id: acme-data-scientist
+    title:
+      fr: Data Scientist (stage)
+      en: Data Scientist (internship)
+    organization: Acme Corp
+    location: Lyon
+    start: 2025-02
+    end: 2025-08
+    bullets:
+      - fr: Développement d'un modèle de prévision de la demande (XGBoost), erreur réduite de 15 %.
+        en: Built a demand forecasting model (XGBoost), reducing error by 15%.
+      - fr: Automatisation du pipeline de données quotidien en Python.
+        en: Automated the daily data pipeline in Python.
+    technologies: [Python, XGBoost, Pandas]
+
+projects:
+  - id: movie-recommender
+    title:
+      fr: Système de recommandation de films
+      en: Movie recommendation system
+    start: 2024-10
+    end: 2024-12
+    bullets:
+      - fr: Filtrage collaboratif sur 1 million de notes.
+        en: Collaborative filtering on 1 million ratings.
+    technologies: [Python, Surprise]
+
+education:
+  - degree:
+      fr: Diplôme d'ingénieur, Informatique
+      en: Engineering degree (MSc), Computer Science
+    school: École d'ingénieurs Exemple
+    location: Lyon
+    start: 2022
+    end: 2025
+
+languages:
+  - name: {fr: Français, en: French}
+    level: {fr: Langue maternelle, en: Native}
+  - name: {fr: Anglais, en: English}
+    level: {fr: Courant (C1), en: Fluent (C1)}
