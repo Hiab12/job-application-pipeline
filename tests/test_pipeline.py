@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from jobpipeline.config import ScoringConfig, load_settings
-from jobpipeline.errors import DocumentError, LLMError, LLMFatalError, SourceError
+from jobpipeline.errors import DocumentError, LLMError, LLMFatalError, NotionError, SourceError
 from jobpipeline.llm.client import TokenUsage
 from jobpipeline.models import (
     ApplicationStatus,
@@ -140,13 +140,31 @@ class FakeGenerator:
         )
 
 
-def run_with(write_config, offers, analyzer, generator=None, **kwargs):
+class FakeTracker:
+    def __init__(self, fail_connect: bool = False, fail_for: set[str] | None = None) -> None:
+        self.fail_connect = fail_connect
+        self.fail_for = fail_for or set()
+        self.recorded: list[tuple[str, ApplicationStatus]] = []
+
+    def connect(self) -> None:
+        if self.fail_connect:
+            raise NotionError("database not shared")
+
+    def record(self, scored: ScoredOffer) -> str:
+        if scored.offer.source_id in self.fail_for:
+            raise NotionError("validation_error")
+        self.recorded.append((scored.offer.source_id, scored.status))
+        return f"https://notion.so/{scored.offer.source_id}"
+
+
+def run_with(write_config, offers, analyzer, generator=None, tracker=None, **kwargs):
     settings = load_settings(write_config(), env_file=None)  # min 6, review from 5
     pipeline = Pipeline(
         settings,
         sources=[FakeSource(offers)],
         analyzer=analyzer,
         generator=generator or FakeGenerator(),
+        tracker=tracker,
     )
     return pipeline.run(**kwargs)
 
@@ -227,3 +245,47 @@ def test_dry_run_never_calls_claude(write_config):
     summary = run_with(write_config, [offer("A")], analyzer, dry_run=True)
     assert analyzer.analyzed == []
     assert summary.analyzed == 0
+
+
+# -------------------------------------------------------------------- notion
+
+
+def test_every_analyzed_offer_is_recorded_with_its_status(write_config):
+    analyzer = FakeAnalyzer({"A": 8.0, "B": (5.5, "low"), "C": 3.0, "D": LLMError("x")})
+    tracker = FakeTracker()
+    offers = [offer("A", 4), offer("B", 3), offer("C", 2), offer("D", 1)]
+    summary = run_with(write_config, offers, analyzer, tracker=tracker)
+
+    assert tracker.recorded == [
+        ("A", ApplicationStatus.READY),
+        ("B", ApplicationStatus.TO_REVIEW),
+        ("C", ApplicationStatus.SKIPPED),
+    ]
+    assert summary.in_notion == 3
+    assert summary.results[0].notion_url == "https://notion.so/A"
+
+
+def test_notion_failure_for_one_offer_does_not_stop_the_others(write_config):
+    tracker = FakeTracker(fail_for={"A"})
+    summary = run_with(
+        write_config,
+        [offer("A", 2), offer("B", 1)],
+        FakeAnalyzer({"A": 8.0, "B": 7.0}),
+        tracker=tracker,
+    )
+    assert [r[0] for r in tracker.recorded] == ["B"]
+    assert summary.in_notion == 1
+    assert summary.errors == 1
+
+
+def test_unreachable_notion_stops_the_run_before_any_claude_call(write_config):
+    analyzer = FakeAnalyzer({"A": 8.0})
+    with pytest.raises(NotionError):
+        run_with(write_config, [offer("A")], analyzer, tracker=FakeTracker(fail_connect=True))
+    assert analyzer.analyzed == []
+
+
+def test_without_notion_keys_results_stay_local(write_config):
+    summary = run_with(write_config, [offer("A")], FakeAnalyzer({"A": 8.0}))
+    assert summary.generated == 1
+    assert summary.in_notion == 0

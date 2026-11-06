@@ -23,7 +23,14 @@ from typing import Protocol
 from jobpipeline.config import ScoringConfig, Settings
 from jobpipeline.cv import load_master_cv
 from jobpipeline.documents import DocumentGenerator
-from jobpipeline.errors import ConfigError, DocumentError, LLMError, LLMFatalError, SourceError
+from jobpipeline.errors import (
+    ConfigError,
+    DocumentError,
+    LLMError,
+    LLMFatalError,
+    NotionError,
+    SourceError,
+)
 from jobpipeline.http import build_http_client
 from jobpipeline.llm import ClaudeClient, DocumentWriter, OfferAnalyzer, TokenUsage
 from jobpipeline.models import (
@@ -33,6 +40,7 @@ from jobpipeline.models import (
     OfferAnalysis,
     ScoredOffer,
 )
+from jobpipeline.notion import NotionClient, NotionTracker
 from jobpipeline.sources import JobSource, build_sources
 
 logger = logging.getLogger(__name__)
@@ -49,6 +57,12 @@ class Generator(Protocol):
     def generate(self, scored: ScoredOffer) -> GeneratedDocuments: ...
 
 
+class Tracker(Protocol):
+    def connect(self) -> None: ...
+
+    def record(self, scored: ScoredOffer) -> str: ...
+
+
 @dataclass
 class RunSummary:
     """Counters and results reported at the end of every run."""
@@ -59,6 +73,7 @@ class RunSummary:
     matched: int = 0
     to_review: int = 0
     generated: int = 0
+    in_notion: int = 0
     errors: int = 0
     duration_s: float = 0.0
     error_messages: list[str] = field(default_factory=list)
@@ -74,7 +89,7 @@ class RunSummary:
     def log(self) -> None:
         logger.info(
             "Run finished in %.1fs | fetched=%d new=%d analyzed=%d matched=%d to_review=%d "
-            "generated=%d errors=%d",
+            "generated=%d in_notion=%d errors=%d",
             self.duration_s,
             self.fetched,
             self.new,
@@ -82,6 +97,7 @@ class RunSummary:
             self.matched,
             self.to_review,
             self.generated,
+            self.in_notion,
             self.errors,
         )
         for message in self.error_messages:
@@ -106,17 +122,20 @@ class Pipeline:
         sources: list[JobSource] | None = None,
         analyzer: Analyzer | None = None,
         generator: Generator | None = None,
+        tracker: Tracker | None = None,
     ) -> None:
         """
         Args:
             settings: Validated configuration.
-            sources, analyzer, generator: Overrides used by tests. By default they are
-                built from the configuration and the API keys.
+            sources, analyzer, generator, tracker: Overrides used by tests. By default
+                they are built from the configuration and the API keys. Without Notion
+                keys, results stay in the logs and the output folder.
         """
         self.settings = settings
         self._sources = sources
         self._analyzer = analyzer
         self._generator = generator
+        self._tracker = tracker
 
     def run(self, *, dry_run: bool = False, limit: int | None = None) -> RunSummary:
         """Execute one pass.
@@ -140,27 +159,32 @@ class Pipeline:
         )
 
         with ExitStack() as stack:
-            sources = self._sources
-            if sources is None:
+            http = None
+            if self._sources is None or (self._tracker is None and not dry_run):
                 http = stack.enter_context(build_http_client())
-                sources = build_sources(self.settings, http)
+            sources = (
+                self._sources if self._sources is not None else build_sources(self.settings, http)
+            )
             offers = self._fetch_offers(sources, summary)
 
-        summary.fetched = len(offers)
-        summary.new = len(offers)  # until deduplication (step 8), every offer counts as new
-        selected = offers[:limit] if limit else offers
+            summary.fetched = len(offers)
+            summary.new = len(offers)  # until deduplication (step 8), every offer is new
+            selected = offers[:limit] if limit else offers
 
-        if dry_run:
-            self._log_offers(selected)
-        elif selected:
-            self._build_llm_stages()
-            try:
-                self._analyze_offers(selected, summary)
-                self._generate_documents(summary)
-            finally:
-                logger.info("Claude usage: %s", self._analyzer.usage.describe())
-            self._log_results(summary)
-            # Steps 7 and 8 (Notion, dedup) plug in here.
+            if dry_run:
+                self._log_offers(selected)
+            elif selected:
+                tracker = self._connect_tracker(http)  # fails fast, before any Claude cost
+                self._build_llm_stages()
+                try:
+                    self._analyze_offers(selected, summary)
+                    self._generate_documents(summary)
+                finally:
+                    logger.info("Claude usage: %s", self._analyzer.usage.describe())
+                if tracker:
+                    self._record_in_notion(tracker, summary)
+                self._log_results(summary)
+                # Step 8 (deduplication) plugs in here.
 
         summary.duration_s = time.perf_counter() - start
         summary.log()
@@ -183,6 +207,18 @@ class Pipeline:
         self._generator = self._generator or DocumentGenerator(
             DocumentWriter(client, cv, config.llm.writer_model), cv, config.paths.output_dir
         )
+
+    def _connect_tracker(self, http) -> Tracker | None:
+        tracker = self._tracker
+        if tracker is None:
+            secrets = self.settings.secrets
+            if secrets.missing_for("notion"):
+                logger.warning("Notion disabled: keys missing in .env (results stay local)")
+                return None
+            client = NotionClient(secrets.notion_token.get_secret_value(), http)
+            tracker = NotionTracker(client, secrets.notion_database_id.get_secret_value())
+        tracker.connect()
+        return tracker
 
     # ------------------------------------------------------------------ fetch
 
@@ -267,6 +303,20 @@ class Pipeline:
             summary.generated += 1
             logger.info("Documents ready: %s", scored.documents.folder)
 
+    # ----------------------------------------------------------------- notion
+
+    def _record_in_notion(self, tracker: Tracker, summary: RunSummary) -> None:
+        """One row per analyzed offer. A failed row is logged; the documents stay on disk."""
+        logger.info("Saving %d offers to Notion", len(summary.results))
+        for scored in summary.results:
+            try:
+                scored.notion_url = tracker.record(scored)
+            except NotionError as exc:
+                logger.error("Notion failed for %s: %s", scored.offer.uid, exc)
+                summary.record_error(f"{scored.offer.uid}: {exc}")
+                continue
+            summary.in_notion += 1
+
     # ---------------------------------------------------------------- logging
 
     @staticmethod
@@ -306,5 +356,6 @@ class Pipeline:
                 "; ".join(a.key_requirements),
                 "; ".join(a.gaps) or "aucune",
                 r.offer.url,
-                f"\n     Documents : {r.documents.folder}" if r.documents else "",
+                (f"\n     Documents : {r.documents.folder}" if r.documents else "")
+                + (f"\n     Notion : {r.notion_url}" if r.notion_url else ""),
             )

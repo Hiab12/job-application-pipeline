@@ -196,3 +196,4 @@ class ScoredOffer(BaseModel):
     analysis: OfferAnalysis
     status: ApplicationStatus
     documents: GeneratedDocuments | None = None
+    notion_url: str | None = None

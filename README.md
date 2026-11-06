@@ -32,7 +32,7 @@ longer open to individual use. The implementation remains in the Git history.
 | 4 | Structured master CV | ✅ |
 | 5 | Offer analysis and scoring | ✅ |
 | 6 | CV and cover letter generation | ✅ |
-| 7 | Notion integration | ⏳ |
+| 7 | Notion integration | ✅ |
 | 8 | Deduplication | ⏳ |
 | 9 | Pipeline orchestration | ⏳ |
 | 10 | Tests and CI | ⏳ |
@@ -77,6 +77,7 @@ python -m jobpipeline --dry-run    # fetch and log only: no Claude calls, no fil
 python -m jobpipeline --limit 3    # analyze at most 3 offers (caps API costs)
 python -m jobpipeline --log-level DEBUG
 python -m jobpipeline --check-cv   # validate data/master_cv.yaml and print a summary
+python -m jobpipeline --setup-notion <page URL>   # create the Notion tracker database
 ```
 
 ## Offer analysis
@@ -124,6 +125,24 @@ Claude writes the *content*; the code keeps control of the *facts*:
 - The gaps found during analysis are passed to the writer as "never claim these".
 - Layout is fixed in code (`documents/`), so every CV fits on one A4 page with the same style.
 
+## Notion tracker
+
+Every analyzed offer becomes a row in a Notion database, with its score, confidence, key
+requirements, gaps, link, and the full analysis in the page body. Matches get their CV and
+cover letter uploaded into the row, so they open from any device. Skipped offers get a row
+too: the database is the record of what was already processed.
+
+Setup, once:
+1. Create an internal integration at notion.so/profile/integrations and put its token in
+   `.env` as `NOTION_TOKEN`.
+2. Create an empty page and share it with the integration (page menu ••• > Connections).
+3. Run `python -m jobpipeline --setup-notion <page URL>`. It creates the database with every
+   column already configured and prints the `NOTION_DATABASE_ID` line to add to `.env`.
+
+At the start of each run, the pipeline checks the database's columns, so a Notion problem
+stops the run before any paid Claude call. The client targets Notion API version
+`2026-03-11` (databases with data sources, direct file uploads).
+
 ## Master CV
 
 `data/master_cv.yaml` is the single source of truth for every generated document. It lists
@@ -151,6 +170,9 @@ src/jobpipeline/
 │   └── prompts/      # prompts as Markdown files
 ├── logging_setup.py  # console + rotating file logs
 ├── models.py         # JobOffer, OfferAnalysis, normalization helpers
+├── notion/
+│   ├── client.py     # minimal Notion API client: databases, pages, file uploads
+│   └── tracker.py    # database schema, one row per offer, page content
 ├── pipeline.py       # orchestration and run summary
 └── sources/
     ├── base.py            # JobSource interface + shared per-keyword loop

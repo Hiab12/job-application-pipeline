@@ -14,7 +14,7 @@ from collections.abc import Callable
 import httpx
 
 from jobpipeline import __version__
-from jobpipeline.errors import SourceError
+from jobpipeline.errors import PipelineError, SourceError
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ def request_with_retry(
     max_retries: int = DEFAULT_MAX_RETRIES,
     backoff_base_s: float = 1.0,
     sleep: Callable[[float], None] = time.sleep,
+    error_cls: type[PipelineError] = SourceError,
     **kwargs,
 ) -> httpx.Response:
     """Send a request, retrying on rate limits, server errors and network errors.
@@ -59,10 +60,11 @@ def request_with_retry(
         backoff_base_s: First delay; it doubles at each retry (1s, 2s, 4s...).
             A ``Retry-After`` header from the server takes precedence.
         sleep: Injected so tests run instantly.
+        error_cls: Exception raised when every attempt failed (SourceError by default).
         **kwargs: Passed to ``httpx.Client.request`` (params, data, headers...).
 
     Raises:
-        SourceError: when every attempt failed with a retryable error.
+        error_cls: when every attempt failed with a retryable error.
     """
     for attempt in range(max_retries + 1):
         is_last = attempt == max_retries
@@ -70,7 +72,7 @@ def request_with_retry(
             response = client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
             if is_last:
-                raise SourceError(
+                raise error_cls(
                     f"{service}: network error after {attempt + 1} attempts ({exc})"
                 ) from exc
             delay = backoff_base_s * 2**attempt
@@ -83,9 +85,7 @@ def request_with_retry(
         if response.status_code not in RETRYABLE_STATUS:
             return response
         if is_last:
-            raise SourceError(
-                f"{service}: HTTP {response.status_code} after {attempt + 1} attempts"
-            )
+            raise error_cls(f"{service}: HTTP {response.status_code} after {attempt + 1} attempts")
         delay = _retry_after_seconds(response) or backoff_base_s * 2**attempt
         logger.warning(
             "%s: HTTP %d, retry %d/%d in %.1fs",
