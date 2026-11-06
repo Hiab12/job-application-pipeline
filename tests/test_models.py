@@ -16,7 +16,7 @@ from jobpipeline.models import (
 
 def make_offer(**overrides) -> JobOffer:
     data = {
-        "source": OfferSource.FRANCE_TRAVAIL,
+        "source": OfferSource.ADZUNA,
         "source_id": "123ABC",
         "title": "Data Scientist (H/F)",
         "company": "Capgemini",
@@ -54,16 +54,14 @@ def test_normalize_company(raw, expected):
 
 
 def test_uid_combines_source_and_id():
-    assert make_offer().uid == "france_travail:123ABC"
+    assert make_offer().uid == "adzuna:123ABC"
 
 
-def test_same_offer_on_two_sources_has_same_fingerprint():
-    ft = make_offer(title="Data Scientist (H/F)", company="Capgemini France SAS")
-    adzuna = make_offer(
-        source=OfferSource.ADZUNA, source_id="999", title="Data Scientist F/H", company="CAPGEMINI"
-    )
-    assert ft.uid != adzuna.uid
-    assert ft.fingerprint == adzuna.fingerprint == "capgemini|data scientist"
+def test_same_offer_posted_twice_has_same_fingerprint():
+    first = make_offer(title="Data Scientist (H/F)", company="Capgemini France SAS")
+    second = make_offer(source_id="999", title="Data Scientist F/H", company="CAPGEMINI")
+    assert first.uid != second.uid
+    assert first.fingerprint == second.fingerprint == "capgemini|data scientist"
 
 
 @pytest.mark.parametrize("company", [None, "", "  "])

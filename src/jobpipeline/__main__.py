@@ -3,7 +3,7 @@
 Usage:
     python -m jobpipeline                 # full run
     python -m jobpipeline --dry-run       # fetch and log only, no paid calls, no writes
-    python -m jobpipeline --limit 3       # process at most 3 new offers
+    python -m jobpipeline --limit 3       # analyze at most 3 offers (caps API costs)
     python -m jobpipeline --check-cv      # validate data/master_cv.yaml and show a summary
 
 Exit codes: 0 = run completed (per-offer errors are logged in the summary),
@@ -26,7 +26,9 @@ from jobpipeline.pipeline import Pipeline
 logger = logging.getLogger("jobpipeline")
 
 EXIT_OK, EXIT_FATAL, EXIT_CONFIG = 0, 1, 2
-ALL_SERVICES = ("france_travail", "adzuna", "anthropic", "notion")
+# Keys a full run can't do without. Sources only need to be configured for the ones you
+# want: a source without keys is skipped with a warning. Notion joins this list at step 7.
+REQUIRED_FOR_FULL_RUN = ("anthropic",)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch and log offers only: no Claude calls, no files, no Notion writes",
     )
     parser.add_argument(
-        "--limit", type=int, default=None, help="Maximum number of new offers to process"
+        "--limit", type=int, default=None, help="Maximum number of offers to analyze"
     )
     parser.add_argument(
         "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Override log level"
@@ -72,15 +74,11 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(args.log_level or settings.config.logging.level, settings.config.paths.log_dir)
 
-    missing = settings.secrets.missing_for(*ALL_SERVICES)
-    if missing:
-        if args.dry_run:
-            logger.warning("Missing keys (ignored in dry run): %s", ", ".join(missing))
-        else:
+    if not args.dry_run:
+        missing = settings.secrets.missing_for(*REQUIRED_FOR_FULL_RUN)
+        if missing:
             logger.error("Missing keys in .env or environment: %s", ", ".join(missing))
             return EXIT_CONFIG
-
-    if not args.dry_run:
         try:
             load_master_cv(settings.config.paths.master_cv)
         except ConfigError as exc:
@@ -89,8 +87,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         Pipeline(settings).run(dry_run=args.dry_run, limit=args.limit)
-    except PipelineError:
-        logger.exception("Pipeline failed")
+    except PipelineError as exc:
+        logger.error("Run stopped: %s", exc)
         return EXIT_FATAL
     except Exception:
         logger.exception("Unexpected error (this is a bug)")

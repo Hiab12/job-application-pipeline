@@ -13,7 +13,6 @@ VALID_CONFIG = {
     "search": {
         "keywords": ["Machine Learning", "Data Scientist"],
         "location": "Paris",
-        "departement": "75",
         "max_age_days": 3,
     },
     "scoring": {"min_score": 6},

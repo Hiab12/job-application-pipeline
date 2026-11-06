@@ -14,7 +14,7 @@ class ConfigError(PipelineError):
 
 
 class SourceError(PipelineError):
-    """A job source (France Travail, Adzuna) failed to return offers."""
+    """A job source failed to return offers."""
 
 
 class AuthenticationError(SourceError):
@@ -23,6 +23,10 @@ class AuthenticationError(SourceError):
 
 class LLMError(PipelineError):
     """The Claude API call failed or returned an unusable response."""
+
+
+class LLMFatalError(LLMError):
+    """An error that would fail every call (bad key, no credit, unknown model): stop the run."""
 
 
 class DocumentError(PipelineError):

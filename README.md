@@ -1,16 +1,15 @@
 # Job Application Pipeline
 
 An automated assistant for job hunting. Every few hours it fetches new job offers
-from France Travail and Adzuna, uses Claude to score how well each one matches my
+from Adzuna, uses Claude to score how well each one matches my
 CV, writes a tailored one-page CV and cover letter for the good matches, and logs
 everything in a Notion database. I review and apply manually: nothing is ever
 submitted automatically.
 
 ```
-France Travail ─┐
-                ├─► normalize ─► dedup ─► score (Claude) ─► CV + letter (.docx) ─► Notion
-Adzuna ─────────┘                              │ < min score
-                                               └─► logged as "Skipped"
+Adzuna ─► normalize ─► dedup ─► score (Claude) ─► CV + letter (.docx) ─► Notion
+                                      │ < min score
+                                      └─► logged as "Skipped"
 ```
 
 ## Data sources
@@ -18,17 +17,20 @@ Adzuna ─────────┘                              │ < min sco
 | Source | Access | Notes |
 |---|---|---|
 | Adzuna | Free keys, instant | Aggregates many French job boards. Returns a description snippet; the full offer is behind the link. |
-| France Travail | Granted on request | The Offres d'emploi API is now access-on-request. The source is implemented and switches on once access is granted. |
+
+Sources share one interface (`sources/base.py`), so adding a board means writing one class.
+France Travail's Offres d'emploi API was implemented first, then removed: since 2026 it is no
+longer open to individual use. The implementation remains in the Git history.
 
 ## Status
 
 | Step | Feature | Status |
 |---|---|---|
 | 1 | Project skeleton: config, logging, models, CLI | ✅ |
-| 2 | France Travail source | ✅ |
+| 2 | France Travail source (removed: API closed to individuals) | ✅ |
 | 3 | Adzuna source | ✅ |
 | 4 | Structured master CV | ✅ |
-| 5 | Offer analysis and scoring | ⏳ |
+| 5 | Offer analysis and scoring | ✅ |
 | 6 | CV and cover letter generation | ⏳ |
 | 7 | Notion integration | ⏳ |
 | 8 | Deduplication | ⏳ |
@@ -72,10 +74,27 @@ On GitHub Actions, the keys from `.env` are stored as repository secrets with th
 ```bash
 python -m jobpipeline              # full run
 python -m jobpipeline --dry-run    # fetch and log only: no Claude calls, no files, no Notion
-python -m jobpipeline --limit 3    # process at most 3 new offers (caps API costs)
+python -m jobpipeline --limit 3    # analyze at most 3 offers (caps API costs)
 python -m jobpipeline --log-level DEBUG
 python -m jobpipeline --check-cv   # validate data/master_cv.yaml and print a summary
 ```
+
+## Offer analysis
+
+Each offer is sent to Claude with the master CV. Claude returns a structured analysis: the
+offer's language, its 3 to 8 key requirements, the candidate's strengths and gaps for each,
+whether the description was complete, a short justification, and a score out of 10. Offers
+below `scoring.min_score` are skipped.
+
+- **Structured output.** Claude must answer through a tool whose input schema is the
+  `OfferAnalysis` Pydantic model, so the answer is always valid, typed data.
+- **Calibrated scores.** The score is the last field, so Claude lists strengths and gaps
+  before deciding. The scale, hard caps (e.g. 5+ years required) and the rule "never assume a
+  skill the CV doesn't show" are in `llm/prompts/analyze_system.md`.
+- **Cheap by design.** A small, fast model scores every offer; the CV is marked for prompt
+  caching. Token usage is logged at the end of every run.
+- **Failures stay local.** One failed analysis is logged and skipped. A rejected key, missing
+  credit or unknown model stops the run at once, since every other call would fail too.
 
 ## Master CV
 
@@ -96,13 +115,16 @@ src/jobpipeline/
 ├── cv.py             # master CV schema, validation and text rendering
 ├── errors.py         # exception hierarchy
 ├── http.py           # shared HTTP client + retry policy (429, 5xx, network errors)
+├── llm/
+│   ├── client.py     # Claude API wrapper: structured output, error mapping, token usage
+│   ├── analyzer.py   # offer analysis and scoring
+│   └── prompts/      # prompts as Markdown files
 ├── logging_setup.py  # console + rotating file logs
 ├── models.py         # JobOffer, OfferAnalysis, normalization helpers
 ├── pipeline.py       # orchestration and run summary
 └── sources/
     ├── base.py            # JobSource interface + shared per-keyword loop
-    ├── adzuna.py          # Adzuna API (pagination, HTML cleanup)
-    └── france_travail.py  # France Travail API (OAuth2, search, parsing)
+    └── adzuna.py          # Adzuna API (pagination, HTML cleanup)
 tests/                # pytest suite, external APIs simulated with httpx.MockTransport
 ```
 

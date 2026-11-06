@@ -26,9 +26,6 @@ from jobpipeline.errors import ConfigError
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 CONFIG_PATH_ENV_VAR = "JOBPIPELINE_CONFIG"
 
-# France Travail's "publieeDepuis" filter only accepts these values.
-ALLOWED_MAX_AGE_DAYS = (1, 3, 7, 14, 31)
-
 
 class _StrictModel(BaseModel):
     """Base model that rejects unknown keys, so typos in config.yaml are caught."""
@@ -39,11 +36,9 @@ class _StrictModel(BaseModel):
 class SearchConfig(_StrictModel):
     keywords: list[str] = Field(min_length=1)
     location: str = Field(min_length=1)
-    departement: str | None = None
     distance_km: int = Field(default=30, ge=0, le=200)
-    max_age_days: int = 3
-    # Per keyword and per source. France Travail returns at most 150 per request.
-    max_results_per_query: int = Field(default=50, ge=1, le=150)
+    max_age_days: int = Field(default=3, ge=1, le=90)
+    max_results_per_query: int = Field(default=50, ge=1, le=150)  # per keyword and per source
 
     @field_validator("keywords")
     @classmethod
@@ -52,13 +47,6 @@ class SearchConfig(_StrictModel):
         if not cleaned:
             raise ValueError("at least one non-empty keyword is required")
         return cleaned
-
-    @field_validator("max_age_days")
-    @classmethod
-    def _check_max_age(cls, value: int) -> int:
-        if value not in ALLOWED_MAX_AGE_DAYS:
-            raise ValueError(f"must be one of {ALLOWED_MAX_AGE_DAYS}")
-        return value
 
 
 class ScoringConfig(_StrictModel):
@@ -115,8 +103,6 @@ class Secrets(BaseSettings):
 
     model_config = SettingsConfigDict(env_file_encoding="utf-8", extra="ignore", frozen=True)
 
-    france_travail_client_id: SecretStr | None = None
-    france_travail_client_secret: SecretStr | None = None
     adzuna_app_id: SecretStr | None = None
     adzuna_app_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
@@ -125,7 +111,6 @@ class Secrets(BaseSettings):
 
     # Which keys each service needs. ClassVar: a constant, not a setting.
     REQUIRED_BY_SERVICE: ClassVar[dict[str, tuple[str, ...]]] = {
-        "france_travail": ("france_travail_client_id", "france_travail_client_secret"),
         "adzuna": ("adzuna_app_id", "adzuna_app_key"),
         "anthropic": ("anthropic_api_key",),
         "notion": ("notion_token", "notion_database_id"),

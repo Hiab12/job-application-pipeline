@@ -1,7 +1,7 @@
 """Domain models shared by every stage of the pipeline.
 
 Each source converts its own API format into ``JobOffer``, so the rest of the
-pipeline never depends on France Travail or Adzuna specifics.
+pipeline never depends on any job board's specific format.
 """
 
 from __future__ import annotations
@@ -11,12 +11,12 @@ import unicodedata
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class OfferSource(StrEnum):
-    FRANCE_TRAVAIL = "france_travail"
     ADZUNA = "adzuna"
 
 
@@ -87,7 +87,7 @@ class JobOffer(BaseModel):
 
     @property
     def uid(self) -> str:
-        """Unique ID across sources, e.g. ``france_travail:123ABC``. Used for dedup across runs."""
+        """Unique ID across sources, e.g. ``adzuna:4211``. Used for dedup across runs."""
         return f"{self.source}:{self.source_id}"
 
     @property
@@ -103,13 +103,41 @@ class JobOffer(BaseModel):
 
 
 class OfferAnalysis(BaseModel):
-    """What Claude returns when analyzing an offer (filled in at step 5)."""
+    """Claude's analysis of one offer against the master CV.
 
-    score: float = Field(ge=0, le=10)
-    key_requirements: list[str]
-    language: str = Field(pattern=r"^[a-z]{2}$", description="ISO 639-1 code, e.g. 'fr'")
-    summary: str
-    fit_reasoning: str
+    Field order matters: Claude fills the fields in this order, so it lists requirements,
+    strengths and gaps *before* deciding the score, which gives better-calibrated scores.
+    The descriptions are sent to Claude as part of the output schema.
+    """
+
+    language: Literal["fr", "en"] = Field(
+        description="Language the offer is written in ('en' for any language other than French)"
+    )
+    summary: str = Field(description="One sentence describing the role, in English")
+    key_requirements: list[str] = Field(
+        min_length=1,
+        description=(
+            "The 3 to 8 most important requirements, as short phrases, in the offer's language"
+        ),
+    )
+    strengths: list[str] = Field(
+        description="Requirements the candidate clearly meets, each citing evidence from the CV"
+    )
+    gaps: list[str] = Field(
+        description="Requirements the candidate doesn't meet, or that the CV doesn't show"
+    )
+    description_complete: bool = Field(
+        description="False if the description is truncated or too short to judge the role well"
+    )
+    fit_reasoning: str = Field(description="2 to 3 sentences explaining the score, in English")
+    score: float = Field(ge=0, le=10, description="Fit score from 0 to 10, at most one decimal")
+
+
+class ScoredOffer(BaseModel):
+    """An offer together with its analysis."""
+
+    offer: JobOffer
+    analysis: OfferAnalysis
 
 
 class GeneratedDocuments(BaseModel):

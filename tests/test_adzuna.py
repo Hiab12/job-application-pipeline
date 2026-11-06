@@ -100,16 +100,6 @@ def test_parse_offer_handles_missing_optional_fields():
     assert offer.contract_type is None
 
 
-def test_same_offer_on_both_sources_shares_a_fingerprint():
-    from jobpipeline.sources.france_travail import parse_offer as parse_ft
-
-    adzuna = parse_offer(raw_offer(company={"display_name": "CAPGEMINI FRANCE"}))
-    ft = parse_ft(
-        {"id": "X", "intitule": "Data Scientist (H/F)", "entreprise": {"nom": "Capgemini"}}
-    )
-    assert adzuna.fingerprint == ft.fingerprint
-
-
 @pytest.mark.parametrize(
     "raw, expected",
     [
