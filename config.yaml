@@ -14,6 +14,7 @@ search:
 
 scoring:
   min_score: 6              # offers scoring below this (out of 10) are skipped
+  review_min_score: 5       # partial description scoring between 5 and 6: status "To review"
 
 llm:
   analysis_model: "claude-haiku-5-5"   # cheap model: scores every new offer

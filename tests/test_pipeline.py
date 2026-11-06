@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
-from jobpipeline.config import load_settings
-from jobpipeline.errors import LLMError, LLMFatalError, SourceError
+from jobpipeline.config import ScoringConfig, load_settings
+from jobpipeline.errors import DocumentError, LLMError, LLMFatalError, SourceError
 from jobpipeline.llm.client import TokenUsage
-from jobpipeline.models import JobOffer, OfferAnalysis, OfferSource
-from jobpipeline.pipeline import Pipeline
+from jobpipeline.models import (
+    ApplicationStatus,
+    GeneratedDocuments,
+    JobOffer,
+    OfferAnalysis,
+    OfferSource,
+    ScoredOffer,
+)
+from jobpipeline.pipeline import Pipeline, decide_status
 from jobpipeline.sources import JobSource
 
 
@@ -86,43 +94,103 @@ def test_no_source_enabled_is_not_an_error(write_config):
 # ------------------------------------------------------------------ analysis
 
 
-class FakeAnalyzer:
-    """Returns a preset score per offer id, or raises a preset error."""
+def analysis(score: float, confidence: str = "high") -> OfferAnalysis:
+    return OfferAnalysis(
+        language="fr",
+        summary="Un poste.",
+        key_requirements=["Python"],
+        strengths=[],
+        gaps=[],
+        description_complete=confidence == "high",
+        fit_reasoning="Parce que.",
+        confidence=confidence,
+        score=score,
+    )
 
-    def __init__(self, scores: dict[str, float | Exception]) -> None:
-        self.scores = scores
+
+class FakeAnalyzer:
+    """Returns a preset (score, confidence) per offer id, or raises a preset error."""
+
+    def __init__(self, results: dict) -> None:
+        self.results = results
         self.usage = TokenUsage()
         self.analyzed: list[str] = []
 
     def analyze(self, offer: JobOffer) -> OfferAnalysis:
         self.analyzed.append(offer.source_id)
-        result = self.scores[offer.source_id]
+        result = self.results[offer.source_id]
         if isinstance(result, Exception):
             raise result
-        return OfferAnalysis(
-            language="fr",
-            summary="A role.",
-            key_requirements=["Python"],
-            strengths=[],
-            gaps=[],
-            description_complete=True,
-            fit_reasoning="Because.",
-            score=result,
+        score, confidence = result if isinstance(result, tuple) else (result, "high")
+        return analysis(score, confidence)
+
+
+class FakeGenerator:
+    def __init__(self, errors: dict | None = None) -> None:
+        self.errors = errors or {}
+        self.generated: list[str] = []
+
+    def generate(self, scored: ScoredOffer) -> GeneratedDocuments:
+        if scored.offer.source_id in self.errors:
+            raise self.errors[scored.offer.source_id]
+        self.generated.append(scored.offer.source_id)
+        folder = Path("output") / scored.offer.source_id
+        return GeneratedDocuments(
+            folder=folder, cv_path=folder / "cv.docx", cover_letter_path=folder / "letter.docx"
         )
 
 
-def run_with(write_config, offers, analyzer, **kwargs):
-    settings = load_settings(write_config(), env_file=None)  # min_score is 6
-    return Pipeline(settings, sources=[FakeSource(offers)], analyzer=analyzer).run(**kwargs)
+def run_with(write_config, offers, analyzer, generator=None, **kwargs):
+    settings = load_settings(write_config(), env_file=None)  # min 6, review from 5
+    pipeline = Pipeline(
+        settings,
+        sources=[FakeSource(offers)],
+        analyzer=analyzer,
+        generator=generator or FakeGenerator(),
+    )
+    return pipeline.run(**kwargs)
 
 
-def test_offers_at_or_above_min_score_are_matches(write_config):
-    analyzer = FakeAnalyzer({"A": 8.0, "B": 6.0, "C": 5.9})
-    summary = run_with(write_config, [offer("A"), offer("B"), offer("C")], analyzer)
+def status_of(summary, source_id):
+    return next(r.status for r in summary.results if r.offer.source_id == source_id)
 
-    assert summary.analyzed == 3
-    assert summary.matched == 2
-    assert sorted(m.offer.source_id for m in summary.matches) == ["A", "B"]
+
+@pytest.mark.parametrize(
+    "score, confidence, expected",
+    [
+        (8.0, "high", ApplicationStatus.READY),
+        (6.0, "low", ApplicationStatus.READY),
+        (5.5, "low", ApplicationStatus.TO_REVIEW),
+        (5.0, "low", ApplicationStatus.TO_REVIEW),
+        (5.5, "high", ApplicationStatus.SKIPPED),  # confident it's a weak match
+        (4.9, "low", ApplicationStatus.SKIPPED),
+    ],
+)
+def test_decide_status(score, confidence, expected):
+    assert decide_status(analysis(score, confidence), ScoringConfig()) is expected
+
+
+def test_matches_get_documents_and_others_dont(write_config):
+    analyzer = FakeAnalyzer({"A": 8.0, "B": (5.5, "low"), "C": 3.0})
+    generator = FakeGenerator()
+    summary = run_with(write_config, [offer("A"), offer("B"), offer("C")], analyzer, generator)
+
+    assert generator.generated == ["A"]
+    assert (summary.analyzed, summary.matched, summary.to_review, summary.generated) == (3, 1, 1, 1)
+    assert status_of(summary, "A") is ApplicationStatus.READY
+    assert status_of(summary, "B") is ApplicationStatus.TO_REVIEW
+    assert status_of(summary, "C") is ApplicationStatus.SKIPPED
+
+
+def test_failed_generation_marks_the_offer_as_error_and_continues(write_config):
+    analyzer = FakeAnalyzer({"A": 8.0, "B": 7.0})
+    generator = FakeGenerator(errors={"A": DocumentError("disk full")})
+    summary = run_with(write_config, [offer("A", 2), offer("B", 1)], analyzer, generator)
+
+    assert status_of(summary, "A") is ApplicationStatus.ERROR
+    assert status_of(summary, "B") is ApplicationStatus.READY
+    assert summary.generated == 1
+    assert summary.errors == 1
 
 
 def test_failed_analysis_is_recorded_and_others_continue(write_config):
@@ -135,11 +203,17 @@ def test_failed_analysis_is_recorded_and_others_continue(write_config):
     assert "adzuna:A: timeout" in summary.error_messages[0]
 
 
-def test_fatal_error_stops_the_run(write_config):
-    analyzer = FakeAnalyzer({"A": LLMFatalError("bad key"), "B": 7.0})
+@pytest.mark.parametrize("stage", ["analysis", "generation"])
+def test_fatal_error_stops_the_run(write_config, stage):
+    if stage == "analysis":
+        analyzer = FakeAnalyzer({"A": LLMFatalError("bad key"), "B": 7.0})
+        generator = FakeGenerator()
+    else:
+        analyzer = FakeAnalyzer({"A": 7.0, "B": 7.0})
+        generator = FakeGenerator(errors={"A": LLMFatalError("no credit")})
     with pytest.raises(LLMFatalError):
-        run_with(write_config, [offer("A"), offer("B")], analyzer)
-    assert analyzer.analyzed == ["A"]
+        run_with(write_config, [offer("A", 2), offer("B", 1)], analyzer, generator)
+    assert generator.generated == []
 
 
 def test_limit_caps_the_number_of_analyses(write_config):

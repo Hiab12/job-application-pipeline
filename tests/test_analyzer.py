@@ -19,6 +19,7 @@ ANALYSIS = OfferAnalysis(
     gaps=[],
     description_complete=True,
     fit_reasoning="Strong match on the core skills.",
+    confidence="high",
     score=7.5,
 )
 
@@ -82,4 +83,4 @@ def test_format_offer_states_description_length():
 
 def test_analysis_schema_puts_score_last():
     """Claude fills fields in order: reasoning before score gives better-calibrated scores."""
-    assert list(OfferAnalysis.model_fields)[-1] == "score"
+    assert list(OfferAnalysis.model_fields)[-2:] == ["confidence", "score"]

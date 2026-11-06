@@ -2,5 +2,6 @@
 
 from jobpipeline.llm.analyzer import OfferAnalyzer
 from jobpipeline.llm.client import ClaudeClient, TokenUsage
+from jobpipeline.llm.writer import DocumentWriter
 
-__all__ = ["ClaudeClient", "OfferAnalyzer", "TokenUsage"]
+__all__ = ["ClaudeClient", "DocumentWriter", "OfferAnalyzer", "TokenUsage"]

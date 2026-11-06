@@ -8,8 +8,8 @@ submitted automatically.
 
 ```
 Adzuna ─► normalize ─► dedup ─► score (Claude) ─► CV + letter (.docx) ─► Notion
-                                      │ < min score
-                                      └─► logged as "Skipped"
+                                      │ borderline, partial description ─► "To review"
+                                      └─► below thresholds ─► "Skipped"
 ```
 
 ## Data sources
@@ -31,7 +31,7 @@ longer open to individual use. The implementation remains in the Git history.
 | 3 | Adzuna source | ✅ |
 | 4 | Structured master CV | ✅ |
 | 5 | Offer analysis and scoring | ✅ |
-| 6 | CV and cover letter generation | ⏳ |
+| 6 | CV and cover letter generation | ✅ |
 | 7 | Notion integration | ⏳ |
 | 8 | Deduplication | ⏳ |
 | 9 | Pipeline orchestration | ⏳ |
@@ -93,8 +93,36 @@ below `scoring.min_score` are skipped.
   skill the CV doesn't show" are in `llm/prompts/analyze_system.md`.
 - **Cheap by design.** A small, fast model scores every offer; the CV is marked for prompt
   caching. Token usage is logged at the end of every run.
+- **Confidence, not compressed scores.** Some offers come as short snippets. Claude scores the
+  visible evidence on the full scale and reports a `high`/`low` confidence separately.
+
+| Result | Status | Documents |
+|---|---|---|
+| score ≥ `min_score` | Ready to apply | Yes |
+| `review_min_score` ≤ score < `min_score`, low confidence | To review | No |
+| anything else | Skipped | No |
+
 - **Failures stay local.** One failed analysis is logged and skipped. A rejected key, missing
   credit or unknown model stops the run at once, since every other call would fail too.
+
+## Tailored documents
+
+For each match, a stronger model writes a one-page CV and a cover letter in the offer's
+language (French or English), saved in one folder per offer:
+
+```
+output/2026-11-06_hachette-livre_ingenieur-ia-generative/
+├── CV_Hiba_El_Harrab.docx
+└── Lettre_de_motivation_Hiba_El_Harrab.docx
+```
+
+Claude writes the *content*; the code keeps control of the *facts*:
+- Entries are referenced by their id in the master CV, so job titles, companies, dates,
+  education and contact details are always copied from the CV, never typed by the model.
+  An unknown id rejects the whole answer.
+- Skills are checked against the CV; any skill not found in it is dropped and logged.
+- The gaps found during analysis are passed to the writer as "never claim these".
+- Layout is fixed in code (`documents/`), so every CV fits on one A4 page with the same style.
 
 ## Master CV
 
@@ -113,11 +141,13 @@ src/jobpipeline/
 ├── __main__.py       # CLI entry point
 ├── config.py         # config.yaml + .env loading and validation
 ├── cv.py             # master CV schema, validation and text rendering
+├── documents/        # Word rendering: one-page CV, cover letter, file naming
 ├── errors.py         # exception hierarchy
 ├── http.py           # shared HTTP client + retry policy (429, 5xx, network errors)
 ├── llm/
 │   ├── client.py     # Claude API wrapper: structured output, error mapping, token usage
 │   ├── analyzer.py   # offer analysis and scoring
+│   ├── writer.py     # tailored CV and cover letter content, with truthfulness checks
 │   └── prompts/      # prompts as Markdown files
 ├── logging_setup.py  # console + rotating file logs
 ├── models.py         # JobOffer, OfferAnalysis, normalization helpers

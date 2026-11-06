@@ -1,8 +1,10 @@
 """Thin wrapper around the Anthropic SDK that returns validated Pydantic objects.
 
-Structured output uses *forced tool use*: Claude must call a tool whose input schema is
-the Pydantic model's JSON schema, so the answer always arrives as structured data,
-never as free text to parse. The result is still validated before being returned.
+Structured output uses the API's *JSON outputs* feature (``output_config.format``): the
+Pydantic model's JSON schema is sent with the request, and the model's answer is
+constrained to match it, so it always arrives as parseable JSON. Some constraints the
+API doesn't enforce (e.g. a score between 0 and 10) are moved into field descriptions by
+``anthropic.transform_schema``; Pydantic still checks them when the answer comes back.
 
 The SDK already retries rate limits and server errors with backoff; this wrapper maps
 the remaining failures to the pipeline's errors and tracks token usage.
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, TypeVar
 
 import anthropic
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_TIMEOUT_S = 60.0
+DEFAULT_TIMEOUT_S = 120.0
 
 
 @dataclass
@@ -49,6 +52,12 @@ class TokenUsage:
             f"(+{self.cache_read_tokens:,} read from cache, +{self.cache_write_tokens:,} cached), "
             f"{self.output_tokens:,} output tokens"
         )
+
+
+@cache
+def output_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """The JSON schema sent to the API for ``model`` (computed once per model)."""
+    return anthropic.transform_schema(model)
 
 
 class ClaudeClient:
@@ -81,10 +90,8 @@ class ClaudeClient:
         system: str,
         prompt: str,
         output: type[T],
-        tool_name: str,
-        tool_description: str,
         cached_context: str | None = None,
-        max_tokens: int = 2000,
+        max_tokens: int = 4000,
     ) -> T:
         """Ask Claude for an answer matching the ``output`` model.
 
@@ -93,12 +100,11 @@ class ClaudeClient:
             system: Instructions.
             prompt: The per-call content (e.g. one job offer).
             output: Pydantic model describing the expected answer.
-            tool_name: Name of the tool Claude must call to give its answer.
-            tool_description: What the tool records, for Claude.
             cached_context: Large text identical across calls (e.g. the master CV). It is
                 marked for prompt caching, so repeated calls cost less. Caching only kicks in
                 above a minimum length; below it, the text is simply sent as usual.
-            max_tokens: Upper bound on the answer length.
+            max_tokens: Upper bound on the answer length, including any thinking. Only the
+                tokens actually produced are billed, so a generous limit costs nothing.
 
         Raises:
             LLMFatalError: for errors that will fail every call (key, credit, model).
@@ -116,14 +122,7 @@ class ClaudeClient:
                 max_tokens=max_tokens,
                 system=system_blocks,
                 messages=[{"role": "user", "content": prompt}],
-                tools=[
-                    {
-                        "name": tool_name,
-                        "description": tool_description,
-                        "input_schema": output.model_json_schema(),
-                    }
-                ],
-                tool_choice={"type": "tool", "name": tool_name},
+                output_config={"format": {"type": "json_schema", "schema": output_schema(output)}},
             )
         except anthropic.APIStatusError as exc:
             raise _map_status_error(exc, model) from exc
@@ -131,7 +130,7 @@ class ClaudeClient:
             raise LLMError(f"Cannot reach the Claude API: {exc}") from exc
 
         self.usage.add(getattr(response, "usage", None))
-        return _parse_tool_output(response, tool_name, output)
+        return _parse_json_output(response, output)
 
 
 def _map_status_error(exc: anthropic.APIStatusError, model: str) -> LLMError:
@@ -144,27 +143,36 @@ def _map_status_error(exc: anthropic.APIStatusError, model: str) -> LLMError:
         return LLMFatalError(
             f"Model {model!r} not found: check the llm section of config.yaml ({message})"
         )
-    if "credit balance" in message.lower() or "spend limit" in message.lower():
+    lowered = message.lower()
+    if "credit balance" in lowered or "spend limit" in lowered:
         return LLMFatalError(
             f"Claude API credit exhausted: add credit or raise the limit ({message})"
         )
+    if exc.status_code == 400 and ("schema" in lowered or "output_config" in lowered):
+        # A request the API rejects by design fails identically for every offer.
+        return LLMFatalError(f"Request rejected by the Claude API ({message})")
     return LLMError(f"Claude API error {exc.status_code}: {message}")
 
 
-def _parse_tool_output(response: Any, tool_name: str, output: type[T]) -> T:
-    block = next(
-        (
-            b
-            for b in getattr(response, "content", [])
-            if getattr(b, "type", None) == "tool_use" and getattr(b, "name", None) == tool_name
-        ),
-        None,
-    )
-    if block is None:
-        reason = getattr(response, "stop_reason", "unknown")
-        raise LLMError(f"Claude returned no structured answer (stop reason: {reason})")
+def _parse_json_output(response: Any, output: type[T]) -> T:
+    """Read the JSON answer from the response's text block(s) and validate it."""
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        raise LLMError("Claude's answer was cut off (max_tokens reached)")
+    if stop_reason == "refusal":
+        raise LLMError("Claude declined to answer this request")
+
+    text = "".join(
+        getattr(block, "text", "")
+        for block in getattr(response, "content", [])
+        if getattr(block, "type", None) == "text"
+    ).strip()
+    if not text:
+        raise LLMError(f"Claude returned no answer (stop reason: {stop_reason})")
     try:
-        return output.model_validate(block.input)
+        return output.model_validate_json(text)
     except ValidationError as exc:
-        details = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:3])
+        details = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or '(root)'}: {e['msg']}" for e in exc.errors()[:3]
+        )
         raise LLMError(f"Claude's answer didn't match the expected format ({details})") from exc

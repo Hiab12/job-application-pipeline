@@ -10,8 +10,6 @@ from jobpipeline.models import JobOffer, OfferAnalysis
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 MAX_DESCRIPTION_CHARS = 8000  # long enough for any real offer, short enough to cap cost
-TOOL_NAME = "record_analysis"
-TOOL_DESCRIPTION = "Record the analysis of the job offer: requirements, fit and score."
 
 
 def load_prompt(name: str) -> str:
@@ -48,8 +46,6 @@ class OfferAnalyzer:
             cached_context=self._cv_context,
             prompt=format_offer(offer),
             output=OfferAnalysis,
-            tool_name=TOOL_NAME,
-            tool_description=TOOL_DESCRIPTION,
         )
 
 

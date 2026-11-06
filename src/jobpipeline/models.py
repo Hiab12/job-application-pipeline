@@ -23,10 +23,11 @@ class OfferSource(StrEnum):
 class ApplicationStatus(StrEnum):
     """Values of the Status column in Notion."""
 
-    READY = "Ready to apply"
-    SKIPPED = "Skipped"
-    APPLIED = "Applied"
-    ERROR = "Error"
+    READY = "Ready to apply"  # good match, documents generated
+    TO_REVIEW = "To review"  # borderline score on a partial description: check it yourself
+    SKIPPED = "Skipped"  # below the review threshold
+    APPLIED = "Applied"  # set by hand in Notion
+    ERROR = "Error"  # match, but document generation failed
 
 
 # Words removed from company names before comparing them.
@@ -113,7 +114,7 @@ class OfferAnalysis(BaseModel):
     language: Literal["fr", "en"] = Field(
         description="Language the offer is written in ('en' for any language other than French)"
     )
-    summary: str = Field(description="One sentence describing the role, in English")
+    summary: str = Field(description="One sentence describing the role, in French")
     key_requirements: list[str] = Field(
         min_length=1,
         description=(
@@ -121,27 +122,77 @@ class OfferAnalysis(BaseModel):
         ),
     )
     strengths: list[str] = Field(
-        description="Requirements the candidate clearly meets, each citing evidence from the CV"
+        description="Requirements the candidate clearly meets, each citing CV evidence, in French"
     )
     gaps: list[str] = Field(
-        description="Requirements the candidate doesn't meet, or that the CV doesn't show"
+        description="Requirements the candidate doesn't meet or the CV doesn't show, in French"
     )
     description_complete: bool = Field(
         description="False if the description is truncated or too short to judge the role well"
     )
-    fit_reasoning: str = Field(description="2 to 3 sentences explaining the score, in English")
+    fit_reasoning: str = Field(description="2 to 3 sentences explaining the score, in French")
+    confidence: Literal["high", "low"] = Field(
+        description="'low' if missing information could change the score by 2 points or more"
+    )
     score: float = Field(ge=0, le=10, description="Fit score from 0 to 10, at most one decimal")
 
 
-class ScoredOffer(BaseModel):
-    """An offer together with its analysis."""
+# ------------------------------------------------------- generated documents
 
-    offer: JobOffer
-    analysis: OfferAnalysis
+
+class SkillLine(BaseModel):
+    category: str = Field(description="Category name, in the document's language")
+    items: list[str] = Field(min_length=1, description="Skills, copied from the CV's skill lists")
+
+
+class SelectedEntry(BaseModel):
+    id: str = Field(description="id of an experience or project from the CV, e.g. 'acme-intern'")
+    bullets: list[str] = Field(
+        min_length=1,
+        description="1 to 4 bullets, rephrased only from this entry's bullets in the CV",
+    )
+
+
+class TailoredCV(BaseModel):
+    headline: str = Field(description="Title under the name, adapted to the offer, max 8 words")
+    summary: str = Field(description="2 to 3 sentences, max 60 words, tailored to the offer")
+    skills: list[SkillLine] = Field(
+        min_length=1, description="3 to 5 skill lines, most relevant to the offer first"
+    )
+    entries: list[SelectedEntry] = Field(
+        min_length=1,
+        description="Experiences and projects to show, most relevant first, max 10 bullets total",
+    )
+
+
+class CoverLetter(BaseModel):
+    subject: str = Field(description="Subject line, e.g. 'Candidature au poste de ...'")
+    salutation: str = Field(description="e.g. 'Madame, Monsieur,' or 'Dear Hiring Manager,'")
+    paragraphs: list[str] = Field(
+        min_length=3, max_length=5, description="3 to 4 paragraphs, 250 to 350 words in total"
+    )
+    closing: str = Field(description="Formal closing sentence, without the signature")
+
+
+class ApplicationContent(BaseModel):
+    """Everything Claude writes for one application. Facts (dates, schools...) come from the CV."""
+
+    cv: TailoredCV
+    cover_letter: CoverLetter
 
 
 class GeneratedDocuments(BaseModel):
-    """Paths of the documents generated for one offer (filled in at step 6)."""
+    """Paths of the documents generated for one offer."""
 
+    folder: Path
     cv_path: Path
     cover_letter_path: Path
+
+
+class ScoredOffer(BaseModel):
+    """An offer, its analysis, and what the pipeline did with it."""
+
+    offer: JobOffer
+    analysis: OfferAnalysis
+    status: ApplicationStatus
+    documents: GeneratedDocuments | None = None

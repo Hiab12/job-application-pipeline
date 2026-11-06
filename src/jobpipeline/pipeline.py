@@ -1,9 +1,15 @@
 """Pipeline orchestration.
 
 ``Pipeline.run`` chains the stages: fetch -> dedup -> analyze -> generate -> Notion.
-Stages are plugged in step by step. Each stage is isolated: one failing source or
-offer is logged and counted, and the run continues with the rest. Only errors that
-would fail every call (a rejected API key, no credit) stop the run.
+Each stage is isolated: one failing source or offer is logged and counted, and the run
+continues with the rest. Only errors that would fail every call (a rejected API key,
+no credit) stop the run.
+
+Decision after analysis, with the thresholds from config.yaml:
+
+    score >= min_score                                -> documents, "Ready to apply"
+    review_min_score <= score < min_score, low conf.  -> "To review" (no documents)
+    anything else                                     -> "Skipped"
 """
 
 from __future__ import annotations
@@ -14,58 +20,81 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from jobpipeline.config import Settings
+from jobpipeline.config import ScoringConfig, Settings
 from jobpipeline.cv import load_master_cv
-from jobpipeline.errors import ConfigError, LLMError, LLMFatalError, SourceError
+from jobpipeline.documents import DocumentGenerator
+from jobpipeline.errors import ConfigError, DocumentError, LLMError, LLMFatalError, SourceError
 from jobpipeline.http import build_http_client
-from jobpipeline.llm import ClaudeClient, OfferAnalyzer, TokenUsage
-from jobpipeline.models import JobOffer, OfferAnalysis, ScoredOffer
+from jobpipeline.llm import ClaudeClient, DocumentWriter, OfferAnalyzer, TokenUsage
+from jobpipeline.models import (
+    ApplicationStatus,
+    GeneratedDocuments,
+    JobOffer,
+    OfferAnalysis,
+    ScoredOffer,
+)
 from jobpipeline.sources import JobSource, build_sources
 
 logger = logging.getLogger(__name__)
 
 
 class Analyzer(Protocol):
-    """What the pipeline needs from an analyzer (lets tests pass a fake)."""
-
     @property
     def usage(self) -> TokenUsage: ...
 
     def analyze(self, offer: JobOffer) -> OfferAnalysis: ...
 
 
+class Generator(Protocol):
+    def generate(self, scored: ScoredOffer) -> GeneratedDocuments: ...
+
+
 @dataclass
 class RunSummary:
-    """Counters reported at the end of every run."""
+    """Counters and results reported at the end of every run."""
 
     fetched: int = 0
     new: int = 0
     analyzed: int = 0
     matched: int = 0
+    to_review: int = 0
     generated: int = 0
     errors: int = 0
     duration_s: float = 0.0
     error_messages: list[str] = field(default_factory=list)
-    matches: list[ScoredOffer] = field(default_factory=list)
+    results: list[ScoredOffer] = field(default_factory=list)
 
     def record_error(self, message: str) -> None:
         self.errors += 1
         self.error_messages.append(message)
 
+    def with_status(self, *statuses: ApplicationStatus) -> list[ScoredOffer]:
+        return [r for r in self.results if r.status in statuses]
+
     def log(self) -> None:
         logger.info(
-            "Run finished in %.1fs | fetched=%d new=%d analyzed=%d matched=%d "
+            "Run finished in %.1fs | fetched=%d new=%d analyzed=%d matched=%d to_review=%d "
             "generated=%d errors=%d",
             self.duration_s,
             self.fetched,
             self.new,
             self.analyzed,
             self.matched,
+            self.to_review,
             self.generated,
             self.errors,
         )
         for message in self.error_messages:
             logger.warning("Error during run: %s", message)
+
+
+def decide_status(analysis: OfferAnalysis, scoring: ScoringConfig) -> ApplicationStatus:
+    """Status before document generation (a match becomes READY once its documents exist)."""
+    if analysis.score >= scoring.min_score:
+        return ApplicationStatus.READY
+    if analysis.score >= scoring.review_min_score and analysis.confidence == "low":
+        return ApplicationStatus.TO_REVIEW
+    return ApplicationStatus.SKIPPED
 
 
 class Pipeline:
@@ -76,18 +105,18 @@ class Pipeline:
         settings: Settings,
         sources: list[JobSource] | None = None,
         analyzer: Analyzer | None = None,
+        generator: Generator | None = None,
     ) -> None:
         """
         Args:
             settings: Validated configuration.
-            sources: Override the sources (used by tests). By default, every source
-                whose keys are configured is enabled.
-            analyzer: Override the analyzer (used by tests). By default, Claude with the
-                master CV and the model from config.yaml.
+            sources, analyzer, generator: Overrides used by tests. By default they are
+                built from the configuration and the API keys.
         """
         self.settings = settings
         self._sources = sources
         self._analyzer = analyzer
+        self._generator = generator
 
     def run(self, *, dry_run: bool = False, limit: int | None = None) -> RunSummary:
         """Execute one pass.
@@ -124,16 +153,36 @@ class Pipeline:
         if dry_run:
             self._log_offers(selected)
         elif selected:
-            analyzer = self._analyzer or self._build_analyzer()
+            self._build_llm_stages()
             try:
-                self._analyze_offers(selected, analyzer, summary)
+                self._analyze_offers(selected, summary)
+                self._generate_documents(summary)
             finally:
-                logger.info("Claude usage: %s", analyzer.usage.describe())
-            # Steps 6 to 9 (documents, Notion, dedup) plug in here.
+                logger.info("Claude usage: %s", self._analyzer.usage.describe())
+            self._log_results(summary)
+            # Steps 7 and 8 (Notion, dedup) plug in here.
 
         summary.duration_s = time.perf_counter() - start
         summary.log()
         return summary
+
+    # ------------------------------------------------------------------ setup
+
+    def _build_llm_stages(self) -> None:
+        """Create the analyzer and generator, sharing one Claude client (one usage count)."""
+        if self._analyzer and self._generator:
+            return
+        config, secrets = self.settings.config, self.settings.secrets
+        if secrets.anthropic_api_key is None:
+            raise ConfigError("ANTHROPIC_API_KEY is missing in .env")
+        client = ClaudeClient(
+            secrets.anthropic_api_key.get_secret_value(), max_retries=config.llm.max_retries
+        )
+        cv = load_master_cv(config.paths.master_cv)
+        self._analyzer = self._analyzer or OfferAnalyzer(client, cv, config.llm.analysis_model)
+        self._generator = self._generator or DocumentGenerator(
+            DocumentWriter(client, cv, config.llm.writer_model), cv, config.paths.output_dir
+        )
 
     # ------------------------------------------------------------------ fetch
 
@@ -159,25 +208,23 @@ class Pipeline:
 
     # ---------------------------------------------------------------- analyze
 
-    def _build_analyzer(self) -> OfferAnalyzer:
-        config, secrets = self.settings.config, self.settings.secrets
-        if secrets.anthropic_api_key is None:
-            raise ConfigError("ANTHROPIC_API_KEY is missing in .env")
-        client = ClaudeClient(
-            secrets.anthropic_api_key.get_secret_value(), max_retries=config.llm.max_retries
+    def _analyze_offers(self, offers: list[JobOffer], summary: RunSummary) -> None:
+        scoring = self.settings.config.scoring
+        logger.info(
+            "Analyzing %d offers (match from %.1f, review from %.1f)",
+            len(offers),
+            scoring.min_score,
+            scoring.review_min_score,
         )
-        cv = load_master_cv(config.paths.master_cv)
-        return OfferAnalyzer(client, cv, config.llm.analysis_model)
-
-    def _analyze_offers(
-        self, offers: list[JobOffer], analyzer: Analyzer, summary: RunSummary
-    ) -> None:
-        min_score = self.settings.config.scoring.min_score
-        logger.info("Analyzing %d offers (minimum score %.1f)", len(offers), min_score)
+        labels = {
+            ApplicationStatus.READY: "MATCH ",
+            ApplicationStatus.TO_REVIEW: "REVIEW",
+            ApplicationStatus.SKIPPED: "skip  ",
+        }
 
         for i, offer in enumerate(offers, 1):
             try:
-                analysis = analyzer.analyze(offer)
+                analysis = self._analyzer.analyze(offer)
             except LLMFatalError:
                 raise
             except LLMError as exc:
@@ -185,23 +232,40 @@ class Pipeline:
                 summary.record_error(f"{offer.uid}: {exc}")
                 continue
 
+            status = decide_status(analysis, scoring)
             summary.analyzed += 1
-            is_match = analysis.score >= min_score
+            summary.matched += status is ApplicationStatus.READY
+            summary.to_review += status is ApplicationStatus.TO_REVIEW
+            summary.results.append(ScoredOffer(offer=offer, analysis=analysis, status=status))
             logger.info(
-                "%3d/%d %s %4.1f/10 | %s | %s%s",
+                "%3d/%d %s %4.1f/10 (%s confidence) | %s | %s",
                 i,
                 len(offers),
-                "MATCH" if is_match else "skip ",
+                labels[status],
                 analysis.score,
+                analysis.confidence,
                 offer.title,
                 offer.company or "(company not disclosed)",
-                "" if analysis.description_complete else " | partial description",
             )
-            if is_match:
-                summary.matched += 1
-                summary.matches.append(ScoredOffer(offer=offer, analysis=analysis))
 
-        self._log_matches(summary.matches)
+    # --------------------------------------------------------------- generate
+
+    def _generate_documents(self, summary: RunSummary) -> None:
+        matches = summary.with_status(ApplicationStatus.READY)
+        if matches:
+            logger.info("Writing tailored CV and cover letter for %d matches", len(matches))
+        for scored in matches:
+            try:
+                scored.documents = self._generator.generate(scored)
+            except LLMFatalError:
+                raise
+            except (LLMError, DocumentError) as exc:
+                logger.error("Documents failed for %s: %s", scored.offer.uid, exc)
+                summary.record_error(f"{scored.offer.uid}: {exc}")
+                scored.status = ApplicationStatus.ERROR
+                continue
+            summary.generated += 1
+            logger.info("Documents ready: %s", scored.documents.folder)
 
     # ---------------------------------------------------------------- logging
 
@@ -221,20 +285,26 @@ class Pipeline:
             )
 
     @staticmethod
-    def _log_matches(matches: list[ScoredOffer]) -> None:
-        if not matches:
-            logger.info("No offer reached the minimum score")
+    def _log_results(summary: RunSummary) -> None:
+        shown = summary.with_status(
+            ApplicationStatus.READY, ApplicationStatus.ERROR, ApplicationStatus.TO_REVIEW
+        )
+        if not shown:
+            logger.info("No match and nothing to review in this run")
             return
-        logger.info("Matches, best first:")
-        for m in sorted(matches, key=lambda m: m.analysis.score, reverse=True):
-            a = m.analysis
+        logger.info("Results, best first:")
+        for r in sorted(shown, key=lambda r: r.analysis.score, reverse=True):
+            a = r.analysis
             logger.info(
-                "  %.1f/10 %s | %s\n     Why: %s\n     Requirements: %s\n     Gaps: %s\n     %s",
+                "  [%s] %.1f/10 %s | %s\n     Pourquoi : %s\n     Exigences : %s\n"
+                "     Lacunes : %s\n     %s%s",
+                r.status,
                 a.score,
-                m.offer.title,
-                m.offer.company or "(company not disclosed)",
+                r.offer.title,
+                r.offer.company or "(company not disclosed)",
                 a.fit_reasoning,
                 "; ".join(a.key_requirements),
-                "; ".join(a.gaps) or "none",
-                m.offer.url,
+                "; ".join(a.gaps) or "aucune",
+                r.offer.url,
+                f"\n     Documents : {r.documents.folder}" if r.documents else "",
             )

@@ -18,7 +18,15 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from jobpipeline.errors import ConfigError
@@ -51,6 +59,15 @@ class SearchConfig(_StrictModel):
 
 class ScoringConfig(_StrictModel):
     min_score: float = Field(default=6, ge=0, le=10)
+    # Offers between review_min_score and min_score, on a partial description, are kept
+    # as "To review" (no documents) instead of skipped: the full offer may change the verdict.
+    review_min_score: float = Field(default=5, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def _check_order(self) -> ScoringConfig:
+        if self.review_min_score > self.min_score:
+            raise ValueError("review_min_score must be lower than or equal to min_score")
+        return self
 
 
 class LLMConfig(_StrictModel):

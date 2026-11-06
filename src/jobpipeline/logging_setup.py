@@ -12,7 +12,7 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 LOG_FILE_NAME = "pipeline.log"
 
 # Third-party libraries that log every HTTP request at INFO level.
-NOISY_LOGGERS = ("httpx", "httpcore", "urllib3", "anthropic", "notion_client")
+NOISY_LOGGERS = ("httpx", "httpx2", "httpcore", "urllib3", "anthropic", "notion_client")
 
 
 def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:

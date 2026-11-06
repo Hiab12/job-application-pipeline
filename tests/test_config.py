@@ -49,6 +49,7 @@ def test_invalid_yaml_raises(tmp_path: Path):
     "data, expected_field",
     [
         ({**VALID_CONFIG, "scoring": {"min_score": 11}}, "scoring.min_score"),
+        ({**VALID_CONFIG, "scoring": {"min_score": 6, "review_min_score": 7}}, "review_min_score"),
         (_config_with(max_age_days=0), "search.max_age_days"),
         (_config_with(keywords=["  ", ""]), "search.keywords"),
         (_config_with(keywrods=["typo"]), "search.keywrods"),
